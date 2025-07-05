@@ -2,7 +2,6 @@
 
 import fitz
 from PyQt6.QtGui import QImage, QPixmap
-from app.config.settings import PDF_RENDER_DPI
 
 
 class PDFService:
@@ -30,54 +29,47 @@ class PDFService:
     def get_page_count(self):
         return self.doc.page_count if self.doc else 0
 
-    def get_page_as_pixmap(self, page_num):
-        """Lấy ảnh GỐC của trang."""
+    def get_page_as_pixmap(self, page_num, dpi):
+        """Render ảnh GỐC của trang ở một DPI cụ thể."""
         if not self.doc or not (0 <= page_num < self.doc.page_count):
-            return None
+            return None, 1.0, 1.0  # Trả về giá trị an toàn
 
         page = self.doc.load_page(page_num)
-        pix = page.get_pixmap(dpi=PDF_RENDER_DPI)
+        page_width_points = page.rect.width
+        scale_factor = dpi / 72.0 if page_width_points > 0 else 1.0
+
+        pix = page.get_pixmap(dpi=dpi)
         image = QImage(pix.samples, pix.width, pix.height,
                        pix.stride, QImage.Format.Format_RGB888)
-        return QPixmap.fromImage(image)
+        return QPixmap.fromImage(image), page_width_points, scale_factor
 
-    def get_clean_page_as_pixmap(self, page_num):
-        """
-        Tạo ảnh nền SẠCH bằng cách xóa tất cả text trên một bản sao tạm thời.
-        Cách này đảm bảo đối tượng self.doc gốc không bị thay đổi.
-        """
-        if not self.file_path:  # Cần file_path để mở bản sao
+    def get_clean_page_as_pixmap(self, page_num, dpi):
+        """Tạo ảnh nền SẠCH ở một DPI cụ thể trên bản sao tạm thời."""
+        if not self.file_path:
             return None
 
-        # --- LOGIC MỚI: TẠO BẢN SAO TÀI LIỆU TẠM THỜI ---
         try:
             temp_doc = fitz.open(self.file_path)
             page = temp_doc.load_page(page_num)
 
-            # Thêm các vùng cần biên tập (redaction) cho tất cả các vùng chữ
             for rect in page.get_text_blocks():
                 page.add_redact_annot(rect[:4])
 
-            # Áp dụng các thay đổi, xóa sạch text
             page.apply_redactions()
 
-            # Render trang đã sạch chữ này
-            pix = page.get_pixmap(dpi=PDF_RENDER_DPI)
+            pix = page.get_pixmap(dpi=dpi)
             image = QImage(pix.samples, pix.width, pix.height,
                            pix.stride, QImage.Format.Format_RGB888)
 
-            # Đóng bản sao tạm thời lại
             temp_doc.close()
-
             return QPixmap.fromImage(image)
 
         except Exception as e:
             print(f"Error creating clean background: {e}")
             return None
-        # --- KẾT THÚC LOGIC MỚI ---
 
     def extract_text_blocks(self, page_num):
-        """Hàm này bây giờ sẽ luôn làm việc trên self.doc gốc, không bị ảnh hưởng."""
+        """Trích xuất dữ liệu theo cấu trúc Khối > Dòng."""
         if not self.doc or not (0 <= page_num < self.doc.page_count):
             return []
 

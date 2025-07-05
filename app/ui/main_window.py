@@ -18,7 +18,6 @@ class MainWindow(QMainWindow):
 
         self.pdf_service = PDFService()
         self.translation_controller = TranslationController()
-        # Quan trọng: Cho controller biết nó đang làm việc với service nào
         self.translation_controller.set_pdf_service(self.pdf_service)
 
         self.nav_toolbar = NavigationToolbar()
@@ -26,9 +25,8 @@ class MainWindow(QMainWindow):
         self.viewer = ViewerWidget()
 
         self.current_page = 0
-        self.original_pixmap = None
-        self.translated_pixmap = None
-        self.is_translated_view = False
+        self.cached_translated_blocks = None
+        self.current_pixmap_is_translated = False
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -57,7 +55,9 @@ class MainWindow(QMainWindow):
             self.viewer.fit_to_page)
         self.zoom_toolbar.fit_to_width_requested.connect(
             self.viewer.fit_to_width)
+
         self.viewer.zoom_changed.connect(self.zoom_toolbar.update_zoom_label)
+        self.viewer.render_requested.connect(self.render_current_view)
 
     def open_file_dialog(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -67,58 +67,81 @@ class MainWindow(QMainWindow):
 
     def load_pdf(self, file_path):
         if self.pdf_service.open_pdf(file_path):
-            self.current_page = 0
-            self.show_page(self.current_page)
+            self.show_page(0)
         else:
             self.viewer.set_pixmap(None)
 
     def show_page(self, page_num):
-        self.original_pixmap = self.pdf_service.get_page_as_pixmap(page_num)
-        self.translated_pixmap = None
-        self.is_translated_view = False
+        self.current_page = page_num
+        self.cached_translated_blocks = None
+        self.current_pixmap_is_translated = False
 
-        if self.original_pixmap:
-            self.viewer.set_pixmap(self.original_pixmap)
-            self.nav_toolbar.page_label.setText(
-                f"Page: {page_num + 1} / {self.pdf_service.get_page_count()}")
-        else:
-            self.viewer.set_pixmap(None)
-            self.nav_toolbar.page_label.setText("Page: 0 / 0")
+        self.nav_toolbar.page_label.setText(
+            f"Page: {page_num + 1} / {self.pdf_service.get_page_count()}")
+        self.viewer.request_initial_render()
 
     def show_prev_page(self):
         if self.pdf_service.doc and self.current_page > 0:
-            self.current_page -= 1
-            self.show_page(self.current_page)
+            self.show_page(self.current_page - 1)
 
     def show_next_page(self):
         if self.pdf_service.doc and self.current_page < self.pdf_service.get_page_count() - 1:
-            self.current_page += 1
-            self.show_page(self.current_page)
+            self.show_page(self.current_page + 1)
 
     def translate_current_page(self):
         if not self.pdf_service.doc:
             return
 
-        # --- LOGIC DỊCH MỚI ---
-        # Chỉ cần truyền số trang, controller sẽ tự lo phần còn lại
-        self.translated_pixmap = self.translation_controller.translate_page(
+        print("Translating page...")
+        self.cached_translated_blocks = self.translation_controller.translate_and_cache_page(
             self.current_page)
 
-        if self.translated_pixmap:
-            self.is_translated_view = True
-            self.viewer.set_pixmap(self.translated_pixmap)
-            print("Translation complete.")
+        if self.cached_translated_blocks:
+            self.current_pixmap_is_translated = True
+            print("Translation complete. Data cached.")
+            self.render_current_view(self.viewer.zoom_factor)
         else:
-            print("Translation failed.")
+            print("No text found or translation failed.")
 
     def toggle_view(self):
-        if not self.original_pixmap:
+        if not self.pdf_service.doc:
             return
 
-        self.is_translated_view = not self.is_translated_view
+        if self.cached_translated_blocks:
+            self.current_pixmap_is_translated = not self.current_pixmap_is_translated
+            self.render_current_view(self.viewer.zoom_factor)
 
-        if self.is_translated_view and self.translated_pixmap:
-            self.viewer.set_pixmap(self.translated_pixmap)
+    def render_current_view(self, zoom_factor):
+        if not self.pdf_service.doc:
+            return
+
+        page = self.pdf_service.doc.load_page(self.current_page)
+
+        if zoom_factor == -1.0:
+            viewport_width = self.viewer.scroll_area.viewport().width() - 2
+            zoom_factor = viewport_width / page.rect.width if page.rect.width > 0 else 1.0
+        elif zoom_factor == -2.0:
+            viewport_size = self.viewer.scroll_area.viewport().size()
+            width_ratio = viewport_size.width() / page.rect.width if page.rect.width > 0 else 1.0
+            height_ratio = viewport_size.height(
+            ) / page.rect.height if page.rect.height > 0 else 1.0
+            zoom_factor = min(width_ratio, height_ratio)
+
+        self.viewer.zoom_factor = zoom_factor
+        self.viewer.zoom_changed.emit(int(zoom_factor * 100))
+
+        # Ép kiểu DPI sang số nguyên để tránh lỗi
+        dpi = int(72 * zoom_factor)
+        if dpi < 10:
+            dpi = 10
+
+        final_pixmap = None
+        if self.current_pixmap_is_translated and self.cached_translated_blocks:
+            final_pixmap = self.translation_controller.render_translated_page(
+                self.current_page, self.cached_translated_blocks, dpi
+            )
         else:
-            self.viewer.set_pixmap(self.original_pixmap)
-            self.is_translated_view = False
+            final_pixmap, _, _ = self.pdf_service.get_page_as_pixmap(
+                self.current_page, dpi)
+
+        self.viewer.set_pixmap(final_pixmap)
